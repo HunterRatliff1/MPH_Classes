@@ -1,0 +1,635 @@
+---
+title: "Foundations Project 2"
+author: "Hunter Ratliff, @HunterRatliff1"
+date: "10/16/2019"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, message=F, warning=F)
+require(tidyverse)
+require(ggthemes)
+require(scales)
+require(lubridate)
+require(googlesheets)
+```
+
+```{r read_data}
+
+# Read in data from table 17
+mortality <- readr::read_csv("~/Google Drive/'UTMB/- MPH/[6335] Foundations of Public Health/Project 2 [Foundations PH, 6335]/Table17_Cancer.csv") %>% select(-X1) %>%
+  mutate(year = as.numeric(year))
+# mortality <- googlesheets::gs_title("table017") %>%
+#   gs_read_csv() %>%
+#   gather("year", "deaths", `1950`:`2016`) %>%
+#   filter(Disease %in% c("Colon, rectum, and anus", "Malignant neoplasms", "All causes"))
+  
+
+# read in Healthy People data
+HP <- readxl::read_excel("~/Google Drive/'UTMB/- MPH/[6335] Foundations of Public Health/Project 2 [Foundations PH, 6335]/C-16-data.xlsx") %>%
+  mutate(PopTitle = str_replace(PopTitle, "Hispanic or Latino", "Latino")) %>%
+  mutate(PopTitle = str_replace(PopTitle, " or African American", "")) %>%
+  mutate(PopTitle = str_replace(PopTitle, "American Indian or Alaska Native", "AmIAK")) %>%
+  
+  # filter some vars
+  filter(PopTitle!="White only") %>%
+  filter(PopTitle!="Not Latino") %>%
+  filter(PopTitle!="Black only, not Latino") %>%
+  filter(PopTitle!="50-64 years") 
+
+
+SEER <- readr::read_csv("~/Google Drive/'UTMB/- MPH/[6335] Foundations of Public Health/Project 2 [Foundations PH, 6335]/SEER.csv", skip = 3) %>%
+  select(Sex:`AA Rate Upper Confidence Interval`) %>%
+  filter(`Rate Type`=="Observed Rates") %>%
+  select(-`Rate Type`) %>%
+  rename(Race=`Race/Ethnicity`) %>%
+  mutate(
+    Race = str_replace(Race, "American Indian / Alaska Native", "AmIAN"),
+    Race = str_replace(Race, "Asian / Pacific Islander", "Asian"),
+    Race = str_replace(Race, "includes", "inc")
+  ) %>%
+  mutate(
+    `Age-adjusted (AA) Rate per 100,000` = na_if(`Age-adjusted (AA) Rate per 100,000`, "-"),
+    `AA Rate Lower Confidence Interval`  = na_if(`AA Rate Lower Confidence Interval`, "-"),
+    `AA Rate Upper Confidence Interval`  = na_if(`AA Rate Upper Confidence Interval`, "-")
+  ) %>%
+  mutate(
+    `Age-adjusted (AA) Rate per 100,000` = as.numeric(`Age-adjusted (AA) Rate per 100,000`),
+    `AA Rate Lower Confidence Interval` = as.numeric(`AA Rate Lower Confidence Interval`),
+    `AA Rate Upper Confidence Interval` = as.numeric(`AA Rate Upper Confidence Interval`)
+  )
+names(SEER) <- c("Sex", "Race", "Age", "Year", "Rate", "lower_ci", "upper_ci")
+
+# Select mutually exclusive age categories
+SEER <- SEER %>%
+  mutate(Age = str_trim(str_replace(Age, "Ages", ""))) %>%
+  filter(Age %in% c("< 50", "50-64", "65-74", "75+", "All")) %>%
+  mutate(Race = str_trim(str_replace(Race, "\\(inc Hispanic\\)", ""))) 
+
+
+SEER_mortality <- readr::read_csv("~/Google Drive/'UTMB/- MPH/[6335] Foundations of Public Health/Project 2 [Foundations PH, 6335]/SEER_Mortality.csv", skip = 3) %>%
+  rename(Race=`Race/Ethnicity`) %>%
+  mutate(
+    Race = str_replace(Race, "American Indian / Alaska Native", "AmIAN"),
+    Race = str_replace(Race, "Asian / Pacific Islander", "Asian"),
+    Race = str_replace(Race, "includes", "inc")
+  ) %>%
+  mutate(
+    `Age-adjusted (AA) Rate per 100,000` = na_if(`Age-adjusted (AA) Rate per 100,000`, "-"),
+    `AA Rate Lower Confidence Interval`  = na_if(`AA Rate Lower Confidence Interval`, "-"),
+    `AA Rate Upper Confidence Interval`  = na_if(`AA Rate Upper Confidence Interval`, "-")
+  ) %>%
+  mutate(
+    `Age-adjusted (AA) Rate per 100,000` = as.numeric(`Age-adjusted (AA) Rate per 100,000`),
+    `AA Rate Lower Confidence Interval` = as.numeric(`AA Rate Lower Confidence Interval`),
+    `AA Rate Upper Confidence Interval` = as.numeric(`AA Rate Upper Confidence Interval`)
+  )
+names(SEER_mortality) <-  c("Sex", "Race", "Age", "Year", "Rate", "lower_ci", "upper_ci")
+# Select mutually exclusive age categories
+SEER_mortality <- SEER_mortality %>%
+  mutate(Age = str_trim(str_replace(Age, "Ages", ""))) %>%
+  filter(Age %in% c("< 50", "50-64", "65-74", "75+", "All")) %>%
+  mutate(Race = str_trim(str_replace(Race, "\\(inc Hispanic\\)", ""))) 
+
+```
+
+# Objective
+
+Briefly describe the burden of disease (magnitude, time trends, group differences) associated with the health outcome within the target population.
+
+# Data sets
+
+**HP:** Healthy People 2020 dataset from objective [C-16](https://www.healthypeople.gov/2020/data-search/Search-the-Data#objid=4054;). Outcome is percent of adults receiving colorectal cancer screening based on the most recent guidelines (age-adjusted, 50–75 years)
+
+**Table 17**: Mortality data from earlier in the class
+
+**SEER**: SEER data showing incidence rates of diagnosis of colon and rectum cancer, derived from [this table](https://seer.cancer.gov/explorer/application.php?site=20&data_type=1&graph_type=2&compareBy=sex&chk_sex_3=3&chk_sex_2=2&chk_race_1=1&chk_age_range_1=1&chk_data_type_1=1&advopt_precision=1&advopt_display=2&showDataFor=race_1_and_age_range_1_and_data_type_1)
+
+# Magnitude & time trends
+
+## By Mortality
+
+```{r Mag-Mortality-df}
+df <- mortality %>%
+  filter(year>=1980) %>%
+  mutate(Disease = recode(Disease,
+                          "All causes"         = "Total",
+                          "Malignant neoplasms"= "All Cancers",
+                          "Colon, rectum, and anus"="CRC")) %>%
+  spread(Disease, deaths) %>%
+  mutate(
+    `All Cancers` = CRC/`All Cancers`,
+    Total         = CRC/Total
+  )
+```
+
+
+```{r Mag-Mortality-1}
+# df %>%
+#   # Compare all people
+#   filter(Category=="All persons") %>%
+#   ggplot(aes(x=year, y=CRC)) +
+#   geom_point(alpha=0.25) +
+#   geom_line() +
+#   theme_bw() +
+#   labs(title="Age-adjusted rates of CRC mortality",
+#        y="Deaths per 100k",
+#        caption="Source: Table 17 National Vital Statistics System")
+# 
+# 
+SEER_mortality %>%
+  # Compare all people
+  filter(Age=="All") %>%
+  filter(Sex!="Both Sexes") %>%
+  ggplot(aes(x=Year, y=Rate, group=Race)) +
+  geom_ribbon(aes(ymin=lower_ci, ymax=upper_ci), alpha=0.5, color="grey") +
+  # geom_point(alpha=0.25) +
+  geom_line(aes(color=Race)) +
+  theme_bw() +
+  scale_color_manual(values=c(
+    "White"="#268bd2",
+    "Black"="#dc322f",
+    "All Races"="#3C3C3C")) +
+  guides(fill=F) +
+  facet_wrap("Sex") +
+  theme(legend.position = "bottom") +
+  labs(title="Age-adjusted rates of CRC mortality",
+       subtitle = "With 95% CIs",
+       y="Deaths per 100k",
+       caption="Source: SEER")
+```
+
+```{r survival5}
+tibble(
+  Stage = c("All Stages", "Localized", "Regional", "Distant"),
+  Surv  = c(0.584, 0.869, 0.661, 0.11),
+  lower_ci = c(0.576, 0.857, 0.644, 0.1),
+  upper_ci = c(0.592, 0.88, 0.677, 0.12)
+) %>%
+  ggplot(aes(x=Stage, y=Surv, ymin=lower_ci, ymax=upper_ci)) +
+  geom_col(aes(fill=Stage)) +
+  geom_errorbar(width=0.5) +
+  scale_x_discrete (limits = c("All Stages", "Localized", "Regional", "Distant")) +
+  scale_y_continuous(name="% Surviving at 5 Years", labels = percent) +
+  theme_bw() +
+  guides(fill=F) +
+  labs(title="5-Year Relative Survival Rates, By Stage at Diagnosis",
+       x="Stage at Diagnosis",
+       caption = "Source: SEER")
+```
+
+
+
+```{r Mag-Mortality-2}
+df %>%
+  # Compare all people
+  filter(Category=="All persons") %>%
+  ggplot(aes(x=year, y=Total)) +
+  geom_point(alpha=0.25) +
+  geom_line() +
+  theme_bw() +
+  scale_y_continuous(labels = percent) +
+  labs(title="Proportion of all cause mortality",
+       subtitle = "Proportionate mortality of CRC",
+       y="CRC deaths / Total deaths\n(all cause)",
+       caption="Source: Table 17 National Vital Statistics System")
+```
+
+```{r Mag-Mortality-3}
+df %>%
+  # Compare all people
+  filter(Category=="All persons") %>%
+  ggplot(aes(x=year, y=`All Cancers`)) +
+  geom_point(alpha=0.25) +
+  geom_line() +
+  theme_bw() +
+  scale_y_continuous(labels = percent) +
+  labs(title="Proportion of all cancer deaths",
+       subtitle = "Proportionate mortality of CRC",
+       y="CRC deaths / Total cancer deaths",
+       caption="Source: Table 17 National Vital Statistics System")
+```
+
+
+## By incidence
+
+```{r Mag-SEER}
+SEER %>%
+  filter(Age!="All") %>%
+  
+  filter(Race=="All Races") %>%
+  filter(Sex=="Both Sexes") %>% 
+  ggplot(aes(x=Year, y=Rate, ymax=upper_ci, ymin=lower_ci)) +
+  geom_line(aes(color=Age)) +
+  theme_bw() +
+  scale_color_manual(values=c(
+    "< 50"="#4D9221", "50-64"= "#A1D76A",
+    "65-74"= "#E9A3C9", "75+"="#C51B7D")) +
+  
+  labs(title="Rates of CRC diagnosis, by age",
+       subtitle="Age-adjusted incidence",
+       y="Incidence of CRC per 100k\n(age-adjusted)",
+       caption = "Source: SEER")
+  
+```
+
+
+
+# Group differences
+
+## By mortality
+
+```{r Group-Mortality-1}
+mortality %>%
+  filter(Disease=="Colon, rectum, and anus") %>%
+  filter(year==2016) %>%
+  filter(Category!="Black, non-Hispanic") %>%
+  filter(Category!="White") %>%
+  filter(CategoryType!="Race") %>%
+  # View()
+  ggplot(aes(x=Category, y=deaths, fill=Category)) +
+  geom_col() +
+  theme_bw() +
+  coord_flip() +
+  
+  scale_fill_manual(values=c("All persons"="grey", "Males"="#0084D1", "Females"="#FFD320")) +
+  guides(fill=F) +
+  # facet_wrap("CategoryType", scale="free_y") +
+  labs(title="CRC mortality, by Sex",
+       subtitle="Age-adjusted, 2016",
+       y="Deaths per 100k", x="",
+       caption="Source: Table 17 National Vital Statistics System")
+```
+
+```{r Group-Mortality-2}
+mortality %>%
+  filter(Disease=="Colon, rectum, and anus") %>%
+  filter(year==2016) %>%
+  filter(Category!="Black, non-Hispanic") %>%
+  filter(Category!="White") %>%
+  filter(CategoryType!="Sex") %>%
+  # View()
+  ggplot(aes(x=Category, y=deaths, fill=Category)) +
+  geom_col() +
+  theme_bw() +
+  coord_flip() +
+  scale_fill_manual(values=c(
+    "White, non-Hispanic"="#268bd2",
+    "Hispanic"="#d33682",
+    "Black"="#dc322f",
+    "Asian"="#859900",
+    "AmIAN"="#b58900",
+    "All persons"="#3C3C3C")) +
+  guides(fill=F) +
+  # facet_wrap("CategoryType", scale="free_y") +
+  labs(title="CRC mortality, by race",
+       subtitle="Age-adjusted, 2016",
+       y="Deaths per 100k", x="",
+       caption="Source: Table 17 National Vital Statistics System")
+```
+
+```{r Group-Mortality-Both}
+mortality %>%
+  filter(Disease=="Colon, rectum, and anus") %>%
+  filter(year==2016) %>%
+  filter(Category!="Black, non-Hispanic") %>%
+  filter(Category!="White") %>%
+  # filter(CategoryType!="All") %>%
+  mutate(CategoryType = recode(CategoryType, "All"="Sex")) %>%
+  mutate(Category = str_replace(Category, ", ", ",\n")) %>%
+  
+  ggplot(aes(x=Category, y=deaths, fill=Category)) +
+  geom_col(color="black") +
+  theme_bw() +
+  coord_flip() +
+  scale_fill_manual(values=c(
+    "White,\nnon-Hispanic"="#268bd2",
+    "Hispanic"="#d33682",
+    "Black"="#dc322f",
+    "Asian"="#859900",
+    "AmIAN"="#b58900",
+    "All persons"="grey",
+    "Males"="#7cb5ec", "Females"="#e4d354")) +
+  guides(fill=F) +
+  facet_wrap("CategoryType", scale="free_y") +
+  labs(title="CRC mortality, by Race & Sex",
+       subtitle="Age-adjusted, 2016",
+       y="Deaths per 100k", x="",
+       caption="Source: Table 17 National Vital Statistics System")
+```
+
+
+
+## By incidence
+
+```{r Group-SEER-1}
+SEER %>%
+  mutate(Race = str_replace(Race, "\\(inc Hispanic\\)", "")) %>%
+  filter(Age=="All") %>%
+  filter(Sex!="Both Sexes") %>% 
+  filter(Race!="All Races") %>%
+  filter(Race!="White") %>%
+  # count(Race) %>% .$Race
+  ggplot(aes(x=Year, y=Rate, ymax=upper_ci, ymin=lower_ci)) +
+  # geom_ribbon(aes(group=Race), color="grey", alpha=0.25) +
+  geom_line(aes(color=Race)) +
+  theme_bw() +
+  scale_color_manual(values=c(
+    "Non-Hispanic White"="#D95F02",
+    "Hispanic (any race)"="#1B9E77",
+    "Black"="#E7298A",
+    "Asian"="#7570B3",
+    "AmIAN"="#66A61E",
+    "Total"="#3C3C3C")) +
+  guides(fill=F) +
+  facet_wrap("Sex", ncol=1) +
+  labs(title="Rates of CRC diagnosis, by group",
+       subtitle="Age-adjusted incidence",
+       y="Incidence of CRC per 100k\n(age-adjusted)",
+       caption = "Source: SEER")
+  
+```
+
+```{r Group-SEER-2}
+SEER %>%
+  mutate(Race = str_replace(Race, "\\(inc Hispanic\\)", "")) %>%
+  mutate(Race = str_replace(Race, "Hispanic ", "Hispanic\n")) %>%
+  filter(Year==2016) %>%
+  filter(Age=="All") %>%
+  # filter(Sex!="Both Sexes") %>% 
+  filter(Race!="All Races") %>%
+  filter(Race!="White") %>%
+  ggplot(aes(x=Race, y=Rate, ymax=upper_ci, ymin=lower_ci)) +
+  # geom_ribbon(aes(group=Race), color="grey", alpha=0.25) +
+  geom_col(aes(fill=Sex), position = "dodge") +
+  geom_errorbar(aes(group=Sex),  position = "dodge", alpha=0.5) +
+  # facet_wrap("Sex") + 
+  
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(values=c("Both Sexes"="grey", "Male"="#FF2700", "Female"="#008FD5")) +
+  # scale_fill_manual(values=c(
+  #   "Non-Hispanic\nWhite"="#D95F02",
+  #   "Hispanic\n(any race)"="#1B9E77",
+  #   "Black"="#E7298A",
+  #   "Asian"="#7570B3",
+  #   "AmIAN"="#66A61E",
+  #   "Total"="#3C3C3C")) +
+  # guides(fill=F) +
+  
+  coord_flip() + #facet_wrap("Sex", scales="free_y") +
+  labs(title="Rates of CRC diagnosis, by group",
+       subtitle="Age-adjusted incidence, 2016",
+       y="Incidence of CRC per 100k\n(age-adjusted)",
+       caption = "Source: SEER")
+```
+
+
+# Screening rates
+
+## Interesting groups:
+
+By % of poverty line
+
+```{r HP-Poverty}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Percent_PovertyLine"|Grouping=="Total") %>%
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "Total"="grey",    "<100"="#99000D",
+    "100-199"="#CB181D",  "200-399"="#EF3B2C",
+    "400-599"="#FB6A4A", "600+"="#FC9272")) +
+  guides(fill=F) +
+  coord_flip() +
+  labs(title="% who received CRC screening, by % poverty line",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="Income (as % of poverty line)")
+```
+
+By Race
+
+```{r HP-Race}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Race"|Grouping=="Total") %>%
+  filter(PopTitle!="AmIAK only") %>%
+  filter(PopTitle!="2 or more races") %>%
+  mutate(PopTitle = str_replace(PopTitle, ", ", ",\n")) %>%
+  # count(PopTitle) %>% .$PopTitle
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "White only,\nnot Latino"="#268bd2",
+    "Latino"="#d33682",
+    "Black only"="#dc322f",
+    "Asian only"="#859900",
+    "Total"="grey")) +
+  guides(fill=F) +
+  scale_x_discrete (limits = c("Asian only","Latino", "Black only",
+                               "White only,\nnot Latino","Total")) +
+  coord_flip() +
+  labs(title="% who received CRC screening, by race",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="")
+```
+
+By Age
+
+```{r HP-Age}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Age"|Grouping=="Total") %>%
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "50-54 years"="#6BAED6", "55-64 years"= "#4292C6",
+    "65-75 years"= "#2171B5",
+    "Total"="grey")) +
+  guides(fill=F) +
+  coord_flip() +
+  labs(title="% who received CRC screening, by age group",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="")
+```
+
+By insurance status
+
+```{r HP-Insurance}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Insurance"|Grouping=="Total") %>%
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_fill_manual(name="",values=c(
+    "Insured"="#4DAF4A",  "Private"="#984EA3",
+    "Public"="#377EB8",   "Uninsured"="#E41A1C",
+    "Total"="grey")) +
+  coord_flip() +
+  scale_x_discrete (limits = c("Private","Public",
+                               "Uninsured", "Insured", 
+                               "Total")) +
+  labs(title="% who received CRC screening, by Insurance Status",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="")
+```
+
+By place of birth
+
+```{r HP-Birthplace}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Birthplace"|Grouping=="Total") %>%
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "Outside US"="#FFD320", "US"="#0084D1", "Total"="grey")) +
+  guides(fill=F) +
+  # coord_flip() +
+  scale_x_discrete (limits = c("Outside US", "US",  "Total")) +
+  labs(title="% who received CRC screening, by Birthplace",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="")
+```
+
+By education level
+
+```{r HP-Edu}
+HP %>%
+  filter(Year==max(Year)) %>%
+  filter(Grouping=="Edu"|Grouping=="Total") %>%
+  mutate(PopTitle = str_replace(PopTitle, " degree", "\ndegree")) %>%
+  ggplot(aes(x=PopTitle, y=Estimate, ymax=UpperCI, ymin=LowerCI)) +
+  geom_col(aes(fill=PopTitle)) +
+  geom_errorbar(width=.5) +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "Advanced\ndegree"="#7A0177",   "4-year college\ndegree"="#AE017E",
+    "Associates\ndegree"="#DD3497", "Some college"="#F768A1",
+    "High school"="#FA9FB5",       "< High school"="#FCC5C0",
+    "Total"="grey")) +
+  guides(fill=F) +
+  coord_flip() +
+  scale_x_discrete (limits = c("Advanced\ndegree", "4-year college\ndegree",
+                               "Associates\ndegree", "Some college",
+                               "High school", "< High school",
+                               "Total")) +
+  labs(title="% who received CRC screening, by education",
+       subtitle = "Objective C-16 (2015 data)",
+       caption="Healthy People 2020, Objective C-16",
+       y="Percent of group (age adjusted)", x="Education Level")
+
+# RColorBrewer::brewer.pal(8, "RdPu") %>% show_col()
+# RColorBrewer::brewer.pal(8, "RdPu")
+```
+
+
+# Survival plots
+
+```{r}
+Surv <- readr::read_csv("SEER_Surv.csv") %>%
+  filter(SurvivalRate!="-") %>%
+  mutate(
+    Sex = recode(Sex, "Both Sexes"="Both"),
+    Time = str_trim(str_replace(Time, "years", "year")),
+    Time = str_trim(str_replace(Time, "year", "")),
+  ) %>%
+  
+  mutate(
+    Lower_CI = ifelse(Time=="Diagnosis", 100, Lower_CI),
+    Upper_CI = ifelse(Time=="Diagnosis", 100, Upper_CI),
+    Time     = ifelse(Time=="Diagnosis", "0", Time)
+  ) %>%
+  
+  
+  # Handle ages
+  mutate(Age = str_trim(str_replace(Age, "Ages", ""))) %>%
+  filter(Age %in% c("< 50", "50-64", "65-74", "75+", "All")) %>%
+  
+  # handle race
+  mutate(
+    Race = str_trim(str_replace(Race, " \\(includes Hispanic\\)", "")),
+    Race = str_trim(str_replace(Race, " \\(any race\\)", "")),
+    Race = recode(Race, "Asian / Pacific Islander"="Asian"),
+    Race = recode(Race, "American Indian / Alaska Native"="AmIAN"),
+    Race = recode(Race, "All Races"="All")
+  ) %>%
+  filter(Race!="White") %>%
+  
+  # Make numeric
+  mutate(
+    Time         = as.numeric(Time),
+    SurvivalRate = as.numeric(SurvivalRate),
+    SE           = as.numeric(SE),
+    Lower_CI     = as.numeric(Lower_CI),
+    Upper_CI     = as.numeric(Upper_CI)
+  )
+```
+
+
+```{r surv_plot}
+Surv %>%
+  filter(Sex=="Both", Race=="All", Age=="All", StageAtDx!="Unstaged") %>%
+  ggplot(aes(x=Time, y=SurvivalRate, ymin=Lower_CI, ymax=Upper_CI, 
+             group=StageAtDx)) +
+  geom_ribbon(alpha=0.5, color="grey") +
+  geom_line(aes(color=StageAtDx)) +
+  geom_point(aes(color=StageAtDx)) +
+  # facet_wrap("Age") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_color_discrete(name="Stage at\ndiagnosis") +
+  scale_y_continuous(breaks=seq(0,100,20),limits = c(0,100)) +
+  labs(x="Years (since diagnosis)", y="Percent surviving",
+       title="Survival by stage at diagnosis",
+       caption = "Source: SEER")
+```
+
+```{r}
+tibble(
+  Race      = c("All", "AmIAN", "Asian", "Black", "Hispanic", "Non-Hispanic White"),
+  Localized	= c(39.3,	36.4,	39.0,	38.0,	37.6,	39.5),
+  Regional  = c(34.3,	34.8,	35.4,	31.1,	35.1,	34.8),
+  Distant   = c(20.2,	22.8,	19.2,	24.1,	21.0,	19.7),
+  Unstaged  = c(6.2, 	6.0, 	6.4, 	6.8, 	6.2, 	6.0)
+) %>%
+  gather("Stage", "Percent", -Race) %>%
+  mutate(Percent = Percent/100,
+    Stage   = factor(Stage, levels=c("Localized", "Regional", "Distant", "Unstaged"))) %>%
+  filter(Race != "All", Race != "AmIAN", Stage != "Unstaged") %>%
+  ggplot(aes(x=Stage, y=Percent, fill=Race)) +
+  geom_col(position = "dodge", color="white") +
+  theme_bw() +
+  scale_fill_manual(values=c(
+    "Non-Hispanic White"="#268bd2",
+    "Hispanic"="#b58900",
+    "Black"="#dc322f",
+    "Asian"="#859900")) +
+  scale_y_continuous(labels=percent) +
+  labs(x="", y="% of cases (for each race)",
+       title="Stage at diagnosis, by race",
+       caption="Source: SEER")
+
+```
+
+
